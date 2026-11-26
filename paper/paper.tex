@@ -1,0 +1,160 @@
+\documentclass[preprint,10pt,5p]{elsarticle}
+
+\usepackage{amssymb}
+\usepackage{lineno}
+\usepackage{amsmath}
+\usepackage{algorithm}
+\usepackage[noend]{algpseudocode}
+\usepackage{subcaption}
+\usepackage{hhline}
+\usepackage{hyperref}
+\usepackage{booktabs}
+\usepackage{graphicx}
+
+%% AQUI COMEÇA A PARTE EM QUE VOCÊ DEVE MEXER ...
+
+\journal{Universidade Católica Dom Bosco}
+
+\begin{document}
+
+\begin{frontmatter}
+
+\title{Offline Manager: Leitura de Notícias sem Conexão com\\Service Workers e Stale-While-Revalidate}
+
+\address[label1]{Universidade Católica Dom Bosco, Campo Grande, Brazil}
+
+\author[label1]{Lucas Daniel Duarte Cabral}
+\ead{ra198828@ucdb.br}
+
+\begin{abstract}
+Aplicações de notícias costumam ficar inutilizáveis quando o celular perde a conexão, mesmo que o usuário já tenha aberto as mesmas matérias minutos antes. Este trabalho apresenta o Offline Manager, um leitor de notícias desenvolvido como Progressive Web App (PWA) em TypeScript, React e Ionic, que usa um Service Worker para guardar a interface e o conteúdo em cache. A interface é armazenada por pré-cache no momento da instalação e as respostas da API e as imagens seguem a estratégia Stale-While-Revalidate, que entrega a cópia local imediatamente e atualiza o cache em segundo plano. Além disso, o aplicativo pré-busca cada artigo da lista, permitindo a leitura completa de matérias que nunca foram abertas. Em testes no Google Chrome, a lista de notícias, que leva cerca de 840~ms pela rede, passou a carregar em 21~ms no segundo acesso, e o aplicativo abriu normalmente com o servidor desligado, exibindo os 20 artigos e o conteúdo de um artigo nunca visitado.
+\end{abstract}
+
+\begin{keyword}
+aplicações web progressivas \sep cache no cliente \sep disponibilidade offline \sep Workbox \sep Ionic
+\end{keyword}
+
+\end{frontmatter}
+
+%%%%%%%%%%%%%% I N T R O D U C A O %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Introdução}
+\label{intro}
+
+O consumo de notícias acontece cada vez mais no celular e em situações de conexão instável: transporte público, elevadores, regiões com cobertura fraca ou planos de dados esgotados. Em uma aplicação web tradicional, qualquer falha de rede resulta em uma página de erro, ainda que o conteúdo desejado já tenha sido baixado anteriormente. Para o leitor, isso significa perder o acesso a matérias que estavam, na prática, no próprio aparelho.
+
+As Progressive Web Apps (PWAs) atacam esse problema com o Service Worker, um script que o navegador executa em segundo plano e que funciona como um proxy programável entre a aplicação e a rede~\citep{w3c2022sw}. Com ele, o desenvolvedor decide, requisição por requisição, se a resposta vem da rede, do cache ou de uma combinação dos dois. Uma dessas combinações é a estratégia Stale-While-Revalidate (SWR), originalmente definida como extensão do cabeçalho HTTP \textit{Cache-Control}~\citep{nottingham2010rfc5861}: a resposta guardada é entregue imediatamente e, em paralelo, uma nova cópia é buscada para atualizar o cache.
+
+Este trabalho descreve o desenvolvimento do Offline Manager, um leitor de notícias que aplica essas técnicas com a stack TypeScript, React e Ionic. As contribuições são: (i) um protótipo funcional que abre e permite a leitura completa dos artigos sem internet; (ii) o uso de pré-busca dos artigos da lista para que a leitura offline não dependa de o usuário ter aberto cada matéria antes; e (iii) medições do tempo de carregamento com e sem cache e da disponibilidade com o servidor desligado. A Seção~\ref{works} apresenta trabalhos relacionados, a Seção~\ref{methods} descreve a arquitetura e o experimento, a Seção~\ref{results} mostra os resultados, discutidos na Seção~\ref{discussion}, e a Seção~\ref{conclusion} conclui o trabalho.
+
+%%%%%%%%%%%%%% R E L A T E D   W O R K S %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Trabalhos Relacionados}
+\label{works}
+
+\citet{biornhansen2017pwa} analisaram as PWAs como alternativa ao desenvolvimento multiplataforma e destacaram o funcionamento offline, viabilizado pelo Service Worker, como um dos principais diferenciais em relação a sites comuns e a frameworks híbridos que dependem da rede. Os autores também apontaram que a experiência offline depende inteiramente da estratégia de cache escolhida pelo desenvolvedor.
+
+\citet{malavolta2017energy} avaliaram o impacto dos Service Workers no consumo de energia de PWAs em dispositivos Android. O estudo não encontrou impacto significativo do uso de Service Workers no consumo de energia, o que reforça que o cache no cliente pode ser adotado sem custo relevante de bateria.
+
+A estratégia Stale-While-Revalidate foi formalizada na RFC~5861~\citep{nottingham2010rfc5861} para caches HTTP intermediários. No contexto de Service Workers, ela é oferecida como estratégia pronta pela biblioteca Workbox~\citep{workbox2024}, mantida pelo Google, que também gera automaticamente a lista de arquivos de pré-cache a partir do build da aplicação. O presente trabalho combina essas peças em um caso de uso concreto e mede o resultado.
+
+%%%%%%%%%%%%%% M A T E R I A I S   E   M E T O D O S %%%%%%%%%%%%%%%%%%
+
+\section{Materiais e Métodos}
+\label{methods}
+
+O protótipo foi desenvolvido com TypeScript, React~18 e Ionic~8~\citep{ionic2024}, usando o Vite como ferramenta de build e o plugin \textit{vite-plugin-pwa} para gerar o Service Worker com o Workbox. A aplicação tem duas telas: a lista de notícias, com imagem, fonte, data e título, e a tela de leitura do artigo.
+
+\subsection{Dataset}
+
+Como fonte de conteúdo foi usada a Spaceflight News API (versão~4), uma API REST pública e gratuita, sem necessidade de chave e com CORS habilitado. A lista consulta os 20 artigos mais recentes no endpoint \texttt{/v4/articles/?limit=20} e a tela de leitura consulta \texttt{/v4/articles/\{id\}/}. Cada artigo traz título, resumo, imagem, nome do site de origem, data de publicação e link para a matéria original.
+
+\subsection{Modelos}
+
+O Service Worker usa duas estratégias de cache, resumidas na Tabela~\ref{tab:estrategias}:
+
+\begin{itemize}
+  \item \textbf{Pré-cache do app shell:} no build, o Workbox gera a lista de arquivos da interface (HTML, JavaScript, CSS e ícone) com um hash de versão. Esses arquivos são baixados na instalação do Service Worker, de modo que a interface abre mesmo sem servidor. Navegações para qualquer rota (por exemplo, \texttt{/artigo/40964}) recebem o \texttt{index.html} do cache.
+  \item \textbf{Stale-While-Revalidate:} aplicado às respostas da API de notícias (cache \texttt{noticias-api}) e às imagens (cache \texttt{noticias-imagens}), com limite de 100 entradas e validade de 7 dias. A resposta guardada é entregue na hora e uma cópia nova é buscada em segundo plano; no acesso seguinte, o usuário já vê o conteúdo atualizado.
+\end{itemize}
+
+\begin{table}[h]
+\centering
+\caption{Estratégias de cache usadas por tipo de recurso.}
+\label{tab:estrategias}
+\begin{tabular}{lll}
+\toprule
+Recurso & Estratégia & Cache \\
+\midrule
+HTML, JS, CSS & Pré-cache & workbox-precache \\
+API de notícias & Stale-While-Revalidate & noticias-api \\
+Imagens & Stale-While-Revalidate & noticias-imagens \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Somente o cache por SWR não garante a leitura completa offline, porque uma matéria só seria guardada depois de aberta. Por isso, assim que a lista é carregada, o aplicativo pré-busca o endpoint de cada um dos 20 artigos e as respectivas imagens. Essas requisições passam pelo Service Worker e ficam armazenadas, permitindo abrir qualquer artigo da lista sem conexão.
+
+O aviso de ``Modo Offline'' é exibido no topo da tela a partir da propriedade \texttt{navigator.onLine} e dos eventos \texttt{online} e \texttt{offline} do navegador. A lista também mostra o tempo de carregamento medido com \texttt{performance.now()}, usado no experimento.
+
+\subsection{Setup do Experimento}
+
+Os testes foram feitos no Google Chrome para Windows~11, com a versão de produção do aplicativo servida localmente pelo comando \texttt{vite preview}. O procedimento foi:
+
+\begin{enumerate}
+  \item Primeiro acesso, com o cache vazio, para instalar o Service Worker.
+  \item Segundo acesso (recarregar a página), registrando o tempo de carregamento da lista e o número de entradas em cada cache pela API \texttt{CacheStorage}.
+  \item Desligamento do servidor local e novo carregamento da lista.
+  \item Abertura direta, ainda sem servidor, de um artigo que nunca havia sido aberto.
+\end{enumerate}
+
+Como referência do tempo sem cache, a mesma requisição da lista foi feita diretamente à API com a ferramenta \texttt{curl}.
+
+%%%%%%%%%%%%%% R E S U L T A D O S %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Resultados}
+\label{results}
+
+A Tabela~\ref{tab:tempos} apresenta os tempos de carregamento da lista de 20 notícias. A requisição pela rede levou 839~ms, enquanto o segundo acesso, atendido pelo Service Worker, levou 21~ms. Com o servidor desligado, a lista carregou em 6~ms.
+
+\begin{table}[h]
+\centering
+\caption{Tempo de carregamento da lista de 20 notícias.}
+\label{tab:tempos}
+\begin{tabular}{lr}
+\toprule
+Cenário & Tempo \\
+\midrule
+Rede, sem cache (\texttt{curl}) & 839 ms \\
+Segundo acesso (SWR) & 21 ms \\
+Servidor desligado (cache) & 6 ms \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Após o segundo acesso, os caches continham 13 arquivos de pré-cache da interface, 19 respostas da API (a lista e os artigos pré-buscados) e 16 imagens. Com o servidor desligado, o aplicativo abriu normalmente, exibiu os 20 artigos e mostrou o conteúdo completo de um artigo que nunca havia sido aberto, confirmando o efeito da pré-busca.
+
+Duas das 20 imagens não foram exibidas. A investigação mostrou que o site de origem dessas imagens responde com HTTP~403 a requisições vindas de outros domínios (proteção contra \textit{hotlink}), ou seja, a falha ocorre mesmo com conexão. O aplicativo passou a ocultar imagens que falham, mantendo o título e o texto do artigo.
+
+%%%%%%%%%%%%%% D I S C U S S Ã O %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Discussão}
+\label{discussion}
+
+O ganho de tempo vem do fato de que, com SWR, o aplicativo não espera a rede para mostrar conteúdo. Isso cumpre o resultado esperado de carregar ``instantaneamente'' no segundo acesso. O custo dessa estratégia é que o usuário pode ver, por um acesso, uma versão um pouco desatualizada da lista; para um leitor de notícias isso é aceitável, já que a atualização chega em segundo plano e aparece no acesso seguinte ou ao puxar a tela para atualizar.
+
+A pré-busca foi a decisão que mais influenciou a experiência offline: sem ela, apenas os artigos abertos antes ficariam disponíveis. Em troca, ela gasta dados para baixar matérias que talvez não sejam lidas. Com 20 artigos o volume é pequeno, mas em uma lista maior seria prudente limitar a pré-busca, ou fazê-la somente em Wi-Fi.
+
+O trabalho tem limitações. As medições foram feitas uma única vez, em um computador e com o servidor local, e não em um celular com rede móvel real; o tempo pela rede foi medido com \texttt{curl} e não dentro do navegador. A API usada fornece o resumo do artigo, e não o texto integral publicado no site de origem. Por fim, o \texttt{navigator.onLine} indica apenas se há uma interface de rede ativa, e não se a internet está de fato acessível.
+
+%%%%%%%%%%%%%% C O N C L U S Ã O %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+\section{Conclusão}
+\label{conclusion}
+
+O Offline Manager mostrou que é possível, com poucas linhas de configuração do Workbox, transformar um leitor de notícias em React e Ionic em uma aplicação que abre e permite ler os artigos sem conexão. A combinação de pré-cache da interface, Stale-While-Revalidate para dados e imagens e pré-busca dos artigos reduziu o carregamento da lista de 839~ms para 21~ms e manteve o aplicativo funcional com o servidor desligado. Como trabalhos futuros, propõe-se repetir as medições em celulares com rede móvel, limitar a pré-busca conforme o tipo de conexão e empacotar a aplicação com o Capacitor para distribuição nas lojas.
+
+\bibliographystyle{elsarticle-harvard}
+\bibliography{references}
+
+\end{document}
